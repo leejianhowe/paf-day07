@@ -1,8 +1,12 @@
 const express = require('express')
 const morgan = require('morgan')
+// nodejs
+const EventEmitter = require('events')
+const myEmitter = new EventEmitter()
+const path = require('path');
+
 // const MongoClient = require('mongodb').MongoClient
 // const ObjectId = require('mongodb').ObjectId
-
 // Timestamp is a module of mongodb unique to mongodb
 // depending on type of module exported by packages we can import it in this fashion
 const { MongoClient, ObjectId } = require('mongodb')
@@ -63,6 +67,25 @@ const upload = multer({ dest: DEST })
 //     })
 // })
 
+// listener function
+myEmitter.on('end',()=>{
+
+    // deletes files in uploads on start of server
+    fs.readdir(path.join(__dirname, 'uploads'),(err,files)=>{
+        if(err)
+            throw err
+        if(files.length){
+            console.log(files)
+            files.forEach((ele)=>{
+                fs.unlink(path.join(__dirname,'uploads',ele),()=>{
+                    console.log('emptied files in uploads')
+                })
+            })
+            console.log('emptied files in uploads') 
+        }
+    })
+})
+
 const app = express()
 
 app.use(morgan('combined'))
@@ -70,56 +93,83 @@ app.use(morgan('combined'))
 app.engine('hbs',hbs({defaultLayout:'main.hbs'}))
 app.set('view engine','hbs')
 
-// upload image
-app.post('/upload', upload.single('image'), (req, res) => {
-    // to listen on the 'finish' event we can call delete function
-    // CLEAN UP TECHNIQUE
-    // console.log('body',req.body)
-    // console.log('file',req.file)
-    res.on('finish', () => {
-        fs.unlink(req.file.path, () => {
-            console.log('deleted', req.file.filename)
+// convert fs.readFile call back function to Promise function
+const readFile = (path) => {
+    return new Promise((res, rej) => {
+        fs.readFile(path, (err, data) => {
+            if (err)
+                rej(err)
+            res(data)
         })
     })
-    // to do convert to promise instead of call back functions
-    fs.readFile(req.file.path, (err, data) => {
-        if (err) throw err
-        const params = {
-            Bucket: 'storagedb',
-            Key: req.file.filename,
-            Body: data,
-            ACL: 'public-read',
-            ContentType: req.file.mimetype,
-            ContentLength: req.file.size,
-            Metadata: {
-                originalName: req.file.originalname,
-                update: '' + new Date(),
-            },
-        }
-        s3.putObject(params, (err, results) => {
-            if (err) {
-                console.log(err)
-                res.status(500).send({ error: err.message })
-            }
-            console.log('success upload', results)
-            const docu = makeTemperature(req.body, req.file.filename)
-            mongoClient
+}
+
+// convert s3 object call back into function
+const putObject = (file,data)=>{
+    const params = {
+        Bucket: 'storagedb',
+        Key: file.filename,
+        Body: data,
+        ACL: 'public-read',
+        ContentType: file.mimetype,
+        ContentLength: file.size,
+        Metadata: {
+            originalName: file.originalname,
+            update: '' + new Date(),
+        },
+    }
+    return new Promise((res,rej)=>{
+        s3.putObject(params,(err,results)=>{
+            if(err)
+                rej(err)
+            res(results)
+
+        })
+    })
+} 
+
+// upload image
+app.post('/upload', upload.single('image'), (req, res) => {
+    // console.log('body',req.body)
+    // console.log('file',req.file)
+
+    // to listen on the 'finish' event we can call delete function
+    // CLEAN UP TECHNIQUE
+    // res.on('finish', () => {
+    //     fs.unlink(req.file.path, () => {
+    //         console.log('deleted', req.file.filename)
+    //     })
+    // })
+
+    const docu = makeTemperature(req.body, req.file.filename)
+    // Promise functions
+    readFile(req.file.path)
+        .then(data =>
+            putObject(req.file, data))
+        .then(results => {
+            console.log(results)
+            return mongoClient
                 .db(MONGO_DB)
                 .collection(MONGO_COLLECTION)
                 .insertOne(docu)
-                .then(() => {
-                    res.status(200)
-                        .type('application/json')
-                        .send({ message: 'ok' })
-                })
-                .catch((err) => {
-                    console.log(err)
-                    res.status(500)
-                        .type('application/json')
-                        .json({ error: err.message })
+        })
+        .then(results => {
+            console.log(results)
+            res.status(200)
+                .type('application/json')
+                .send({
+                    message: 'ok',
+                    id:results.ops[0]._id
                 })
         })
-    })
+        .catch((err) => {
+            console.log(err)
+            res.status(500)
+                .type('application/json')
+                .json({
+                    error: err.message
+                })
+        })
 })
 
 // // post temperature only for json data no file
@@ -180,6 +230,8 @@ const checkS3 = new Promise((res, rej) => {
 })
 Promise.all([checkS3, mongoClient.connect()])
     .then(() => {
+        myEmitter.emit('end')
+    }).then(()=>{
         app.listen(PORT, () => {
             console.log(`APP started on ${PORT} on ${new Date()}`)
         })
