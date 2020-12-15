@@ -1,0 +1,12 @@
+<h1>results</h1>
+<div class="container">
+    {{#each result}}
+        <div class="row">
+        {{this.user}}
+        {{this.q1}}
+        {{this.q2}}
+        {{this.temperature}}
+        <img style="width:200px; height:100%" src="https://storagedb.sfo2.digitaloceanspaces.com/{{{this.image}}}">
+        </div>
+    {{/each}}
+</div>
