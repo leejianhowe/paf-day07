@@ -1,9 +1,10 @@
 const express = require('express')
 const morgan = require('morgan')
-// nodejs
+// nodejs modules
 const EventEmitter = require('events')
 const myEmitter = new EventEmitter()
 const path = require('path');
+const process = require('process')
 
 // const MongoClient = require('mongodb').MongoClient
 // const ObjectId = require('mongodb').ObjectId
@@ -11,27 +12,28 @@ const path = require('path');
 // depending on type of module exported by packages we can import it in this fashion
 const { MongoClient, ObjectId } = require('mongodb')
 const multer = require('multer')
-const multerS3 = require('multer-s3')
 const AWS = require('aws-sdk')
 
+// load handlebars
 const hbs = require('express-handlebars')
 
+// use filesystem
 const fs = require('fs')
 
+// configure port
 const PORT = parseInt(process.argv[2]) || parseInt(process.env.PORT) || 3000
 
+// define mongo variables
 const MONGO_URL = 'mongodb://localhost:27017'
 const MONGO_DB = 'temperature'
 const MONGO_COLLECTION = 'dailytemp'
-
-// multer
-const DEST = 'uploads'
 
 const mongoClient = new MongoClient(MONGO_URL, {
     useNewUrlParser: true,
     useUnifiedTopology: true,
 })
 
+// configure s3
 const endpoint = new AWS.Endpoint('sfo2.digitaloceanspaces.com')
 const s3 = new AWS.S3({
     endpoint: endpoint,
@@ -41,55 +43,42 @@ const makeTemperature = (params, filename) => {
     return {
         ts: new Date(),
         user: params.user,
-        q1: JSON.parse(params.q1),
-        q2: JSON.parse(params.q2),
+        q1: 'true' === params.q1.toLowerCase(),
+        q2: 'false'=== params.q2.toLowerCase(),
         temperature: parseFloat(params.temperature),
         image: filename,
     }
 }
+// multer
+const DEST = 'uploads'
 // multer using local storage
-
 const upload = multer({ dest: DEST })
 
-// // multer using multerS3
-// const upload = multer({
-//     storage:multerS3({
-//         s3:s3,
-//         bucket:'storagedb',
-//         acl:'public-read',
-//         metadata:function(req,file,cb){
-//             cb(null,Object.assign({},req.body))
-//         },
-//         key:function(req,file,cb){
-//             cb(null,Date.now().toString())
-//         }
-
-//     })
-// })
 
 // listener function
 myEmitter.on('end',()=>{
-
     // deletes files in uploads on start of server
     fs.readdir(path.join(__dirname, 'uploads'),(err,files)=>{
         if(err)
             throw err
         if(files.length){
+            console.log(`No of files in upload: ${files.length}`)
             console.log(files)
             files.forEach((ele)=>{
                 fs.unlink(path.join(__dirname,'uploads',ele),()=>{
-                    console.log('emptied files in uploads')
                 })
             })
-            console.log('emptied files in uploads') 
+            console.log(`deleted ${files.length} files in uploads`) 
         }
     })
 })
 
+// start app
 const app = express()
-
+// log incoming request
 app.use(morgan('combined'))
 
+// load view engine
 app.engine('hbs',hbs({defaultLayout:'main.hbs'}))
 app.set('view engine','hbs')
 
@@ -143,24 +132,24 @@ app.post('/upload', upload.single('image'), (req, res) => {
 
     const docu = makeTemperature(req.body, req.file.filename)
     // Promise functions
-    readFile(req.file.path)
+
+    const p0 = readFile(req.file.path)
         .then(data =>
             putObject(req.file, data))
-        .then(results => {
-            console.log(results)
-            return mongoClient
+    const p1 = mongoClient
                 .db(MONGO_DB)
                 .collection(MONGO_COLLECTION)
                 .insertOne(docu)
-        })
-        .then(results => {
-            console.log(results)
+    Promise.all([p0,p1])
+        .then(result=>{
+            console.log('successfully upload image',result[0])
+            console.log('successfully insert docu',result[1])
             res.status(200)
-                .type('application/json')
-                .send({
-                    message: 'ok',
-                    id:results.ops[0]._id
-                })
+                    .type('application/json')
+                    .send({
+                        message: 'ok',
+                        id:result[1].insertedId
+                    })
         })
         .catch((err) => {
             console.log(err)
@@ -169,32 +158,11 @@ app.post('/upload', upload.single('image'), (req, res) => {
                 .json({
                     error: err.message
                 })
-        })
+        })               
 })
 
-// // post temperature only for json data no file
-// app.post('/temperature', express.json(), (req, res) => {
-//     // req.body.user, req.body.q1 ,req.body.q2 req.body.temperature
-//     const docu = makeTemperature(req.body)
-//     // insert doc into mongodb
-//     mongoClient
-//         .db(MONGO_DB)
-//         .collection(MONGO_COLLECTION)
-//         .insertOne(docu)
-//         .then(() => {
-//             res.status(200).type('application/json').send({ message: 'ok' })
-//         })
-//         .catch((err) => {
-//             console.log(err)
-//             res.status(500)
-//                 .type('application/json')
-//                 .json({ error: err.message })
-//         })
-// })
-
 // get specific temperature record
-app.get('/temperature/:user', (req, res) => {
-    
+app.get('/temperature/:user', (req, res) => {  
     const user = req.params.user
     mongoClient
         .db(MONGO_DB)
@@ -217,7 +185,6 @@ app.get('/temperature', (req, res) => {
 })
 
 // when express ends can use end function to clean up
-// todo
 
 const checkS3 = new Promise((res, rej) => {
     s3.config.getCredentials((err, cred) => {
@@ -228,10 +195,30 @@ const checkS3 = new Promise((res, rej) => {
         }
     })
 })
+
+
 Promise.all([checkS3, mongoClient.connect()])
     .then(() => {
+        // emits event to clear up uploads
         myEmitter.emit('end')
+        
     }).then(()=>{
+        // process.on('exit', function(code) {
+        //     console.log(code)
+        //     fs.readdir(path.join(__dirname, 'uploads'),(err,files)=>{
+        //         if(err)
+        //             throw err
+        //         if(files.length){
+        //             console.log(`No of files in upload: ${files.length}`)
+        //             console.log(files)
+        //             files.forEach((ele)=>{
+        //                 fs.unlink(path.join(__dirname,'uploads',ele),()=>{
+        //                 })
+        //             })
+        //             console.log(`deleted ${files.length} files in uploads`) 
+        //         }
+        //     })
+        // });
         app.listen(PORT, () => {
             console.log(`APP started on ${PORT} on ${new Date()}`)
         })
